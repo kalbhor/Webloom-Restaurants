@@ -38,7 +38,7 @@ class Booking(Resource):
 
 class Table(Resource):
     def get(self):
-        search_params = self.marshal(request.get_json(), request_method="GET")
+        search_params = self.marshall(request.get_json(), request_method="GET")
 
         tables = db['tables'].find(search_params, {"_id": 0})
         tables = json.loads(json_util.dumps(tables))
@@ -50,7 +50,7 @@ class Table(Resource):
 
 
     def post(self):
-        insertion = self.marshal(request.get_json(), request_method="POST")
+        insertion = self.marshall(request.get_json(), request_method="POST")
         if not insertion:
             return jsonify({"response": "ERROR"})
         else:
@@ -63,7 +63,7 @@ class Table(Resource):
             else:
                 return {"response": "Restaurant id or table size missing"}
 
-    def marshal(data, request_method):
+    def marshall(self, data, request_method):
         if request_method == "GET":
             print('ok1')
             search = {"_id" : data.get("id"), "restaurant_id" : data.get("restaurant_id"), "size" : data.get("size")}
@@ -73,52 +73,63 @@ class Table(Resource):
             return search
 
         elif request_method == "POST":
-            #Do marshaling here
+            #Do marshalling here
             print('ok2')
             return data
 
 class Restaurant(Resource):
-    def get(self,_id=None,name=None,admin=None):
-        search = {"_id" : _id, "name" : name}
-        search = {k: v for k, v in search.items() if v is not None} # Remove keys where val is nonetype
+    def get(self):
+        admin = (request.get_json()).get("admin")
+        print(request.get_json())
+        search_params = self.marshall(request.get_json(), request_method="GET")
 
         if admin:
             print(admin)
-            restaurants = db['restaurant'].find(search)
+            restaurants = db['restaurant'].find(search_params)
         else:
             print('ok')
-            restaurants = db['restaurant'].find(search, {"_id": 0})
+            restaurants = db['restaurant'].find(search_params, {"_id": 0})
 
         restaurants = json.loads(json_util.dumps(restaurants))
 
         if restaurants:
             return jsonify({"status": "ok", "data": restaurants})
         else:
-            return {"response": "no bookings found for {}".format(search)}
+            return {"response": "No bookings found for {}".format(search)}
 
 
     def post(self):
-        data = request.get_json()
-        if not data:
-            data = {"response": "ERROR"}
-            return jsonify(data)
+        insertion = self.marshall(request.get_json(), request_method="POST")
+        if not insertion:
+            return jsonify({"response": "ERROR"})
         else:
-            restaurant_name = data.get('name')
+            restaurant_name = insertion.get('name')
             if restaurant_name:
                 if db['restaurant'].find_one({"name": restaurant_name}):
-                    return {"response": "restaurant already exists."}
+                    return {"response": "Restaurant already exists."}
                 else:
-                    result = db['restaurant'].insert_one(data)
+                    result = db['restaurant'].insert_one(insertion)
                     _id = result.inserted_id
                     return {"response" : "Restaurant added with id {}".format(str(_id))}
             else:
                 return {"response": "Restaurant name missing"}
 
+    def marshall(self, data, request_method):
+        if request_method == "GET":
+            print('ok1')
+            search = {"_id" : data.get("id"), "name" : data.get("name")}
+            search = {k: v for k, v in search.items() if v is not None} # Remove keys where val is nonetype
+            return search
+
+        elif request_method == "POST":
+            #Do marshalling here
+            print('ok2')
+            return data
 
 api = Api(app)
 api.add_resource(Booking, "/api/bookings")
 api.add_resource(Restaurant, "/api/restaurants")
-api.add_resource(Table, "/api/table")
+api.add_resource(Table, "/api/tables")
 
 if __name__ == "__main__":
     app.run(debug=True)
