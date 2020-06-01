@@ -15,22 +15,13 @@ APP_URL = "http://127.0.0.1:5000"
 
 
 class Booking(Resource):
-    def get(self,_id=None,restaurant_id=None,date=None, time=None):
-
-        if request.args:
-            admin = (request.args).get("admin")
-        else:
-            admin = None
-
+    def get(self):
         search_params = self.marshall(request.args, request_method="GET")
         if search_params.get('_id'):
+            # Convert to Mongo readable ID object
             search_params['_id'] = ObjectId(search_params['_id'])
 
-        if admin:
-            bookings = db['bookings'].find(search_params)
-        else:
-            bookings = db['bookings'].find(search_params, {"_id": 0})
-
+        bookings = db['bookings'].find(search_params)
         bookings = json.loads(json_util.dumps(bookings))
 
         if bookings:
@@ -44,21 +35,20 @@ class Booking(Resource):
         if not insertion:
             return jsonify({"response": "ERROR"})
         else:
-            ### Check Booking Logic
+            # Check if booking is valid (tables available, no timeslot overlap, etc)
             data = self.verify(insertion)
 
             if data['status'] is not "ok":
                 return data['status']
 
             insertion = data['data']
-
             result = db['bookings'].insert_one(insertion)
             _id = result.inserted_id
             table_ids = insertion['table_ids']
 
+            # Add booking id to all tables booked
             for table_id in table_ids:
                 write_concern = db['tables'].update_one({"_id" : ObjectId(table_id)}, {"$push" : {"bookings" : _id}})
-
 
             return {"response" : "Booking added with id {}".format(str(_id))}
 
@@ -87,11 +77,14 @@ class Booking(Resource):
             return data
 
     def potential(self, data):
+        """
+        This method finds all potential tables for a booking.
+        Potential tables are all tables with either table size = booking size or if the tables are flexible
+        """
 
-        fixed_ids = []
-        flexible_ids = []
+        fixed_ids = [] # A list of all tables that match the size of booking
+        flexible_ids = [] # A list of all flexible tables
 
-        ## Make a list of table ids containing potential tables
         tables = db['tables'].find({"size" : data['size']})
         tables = json.loads(json_util.dumps(tables))
         for table in tables:
@@ -108,12 +101,17 @@ class Booking(Resource):
         return {"fixed" : fixed_ids, "flexible" : flexible_ids}
 
     def booked(self, data):
+        """
+        This method finds all the potential tables booked during the requested booking timeslot.
+        """
         booked_ids = []
+
         ## Search for all tables booked during specified time slot
         search_params = {"restaurant_id" : data['restaurant_id'],
                         "date" : data['date'],
                         "time_start" : {'$lt' : data['time_end']},
-                        "time_end" : {'$gt' : data['time_start']}
+                        "time_end" : {'$gt' : data['time_start']},
+                        "$or" : [{'size' : data['size']}, {'flexible' : True}]
                         }
 
         bookings = db['bookings'].find(search_params)
@@ -123,11 +121,13 @@ class Booking(Resource):
                 booked_ids.append(table_id)
 
         return booked_ids
-        ###
-
 
 
     def verify(self, data):
+        """
+        This method checks whether the requested booking is possible or not. 
+        It find the potential tables and the booked potential tables. 
+        """
 
         potential_tables = self.potential(data)
         fixed_ids = potential_tables['fixed']
@@ -135,14 +135,17 @@ class Booking(Resource):
 
         booked_ids = self.booked(data)
 
+        ## Gets the tables in potential tables that are not booked
         fixed_available_ids = list(set(fixed_ids) - set(booked_ids))
         flexible_available_ids = list(set(flexible_ids) - set(booked_ids))
 
         if len(fixed_available_ids) > 0:
+            # There is a table with the exact size as requested
             data['table_ids'] = [fixed_available_ids[0]]
             return {"status" : 'ok', "data" : data}
 
         elif len(flexible_available_ids) > 0:
+            # There are no tables with exact size, so find if possible to use combo of flexible tables
             flexible_size = 0
             flexible_ids = []
 
@@ -155,6 +158,7 @@ class Booking(Resource):
                 flexible_size = flexible_size + table['size']
                 flexible_ids.append(table["_id"]["$oid"])
                 if flexible_size >= data['size']:
+                    # If combo of flexible tables is equal or greater than requested size
                     data['table_ids'] = flexible_ids
                     return {"status" : "ok", "data" : data}
 
@@ -164,21 +168,11 @@ class Booking(Resource):
 
 class Table(Resource):
     def get(self):
-
-        if request.args:
-            admin = (request.args).get("admin")
-        else:
-            admin = None
-
         search_params = self.marshall(request.args, request_method="GET")
         if search_params.get('_id'):
             search_params['_id'] = ObjectId(search_params['_id'])
 
-        if admin:
-            tables = db['tables'].find(search_params)
-        else:
-            tables = db['tables'].find(search_params, {"_id": 0})
-
+        tables = db['tables'].find(search_params)
         tables = json.loads(json_util.dumps(tables))
 
         if tables:
@@ -198,17 +192,15 @@ class Table(Resource):
                 result = db['tables'].insert_one(insertion)
                 _id = result.inserted_id
 
-                # add table id to restaurant
-                print(restaurant_id)
+                # Add table id to restaurant
                 write_concern = db['restaurants'].update_one({"_id" : ObjectId(restaurant_id)}, {"$push" : {"tables" : _id}})
-
-                print(write_concern.matched_count)
 
                 return {"response" : "Table added with id {}".format(str(_id))}
             else:
                 return {"response": "Restaurant id or table size missing"}
 
     def marshall(self, data, request_method):
+
 
         data = {} if data is None else data
 
@@ -233,20 +225,12 @@ class Table(Resource):
 class Restaurant(Resource):
     def get(self):
 
-        if request.args:
-            admin = (request.args).get("admin")
-        else:
-            admin = None
 
         search_params = self.marshall(request.args, request_method="GET")
         if search_params.get('_id'):
             search_params['_id'] = ObjectId(search_params['_id'])
 
-        if admin:
-            restaurants = db['restaurants'].find(search_params)
-        else:
-            restaurants = db['restaurants'].find(search_params, {"_id": 0})
-
+        restaurants = db['restaurants'].find(search_params)
         restaurants = json.loads(json_util.dumps(restaurants))
 
         if restaurants:
