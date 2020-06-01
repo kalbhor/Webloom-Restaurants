@@ -38,15 +38,27 @@ class Booking(Resource):
 
 class Table(Resource):
     def get(self):
-        search_params = self.marshall(request.get_json(), request_method="GET")
 
-        tables = db['tables'].find(search_params, {"_id": 0})
+        if request.args:
+            admin = (request.args).get("admin")
+        else:
+            admin = None
+
+        search_params = self.marshall(request.args, request_method="GET")
+        if search_params.get('_id'):
+            search_params['_id'] = ObjectId(search_params['_id'])
+
+        if admin:
+            tables = db['tables'].find(search_params)
+        else:
+            tables = db['tables'].find(search_params, {"_id": 0})
+
         tables = json.loads(json_util.dumps(tables))
 
         if tables:
             return jsonify({"status": "ok", "data": tables})
         else:
-            return {"response": "no tables found for {}".format(search)}
+            return {"response": "no tables found for {}".format(search_params)}
 
 
     def post(self):
@@ -57,45 +69,67 @@ class Table(Resource):
             restaurant_id = insertion['restaurant_id']
             table_size = insertion['size']
             if restaurant_id and table_size:
-                result = db['tables'].insert_one(data)
+                result = db['tables'].insert_one(insertion)
                 _id = result.inserted_id
+
+                # add table id to restaurant
+                print(restaurant_id)
+                write_concern = db['restaurants'].update_one({"_id" : ObjectId(restaurant_id)}, {"$push" : {"tables" : _id}})
+
+                print(write_concern.matched_count)
+
                 return {"response" : "Table added with id {}".format(str(_id))}
             else:
                 return {"response": "Restaurant id or table size missing"}
 
     def marshall(self, data, request_method):
+
+        data = {} if data is None else data
+
         if request_method == "GET":
-            print('ok1')
-            search = {"_id" : data.get("id"), "restaurant_id" : data.get("restaurant_id"), "size" : data.get("size")}
+            search = {"_id" : data.get("id"), "restaurant_id" : data.get("restaurant_id"), 
+                    "size" : data.get("size"), "flexible" : data.get("flexible"), "bookings" : data.get("bookings")}
+
             search = {k: v for k, v in search.items() if v is not None} # Remove keys where val is nonetype
             if data.get("booking_id"):
                 search["booking_ids"] = {"$elemMatch" : data.get("booking_id")}
+            
             return search
 
         elif request_method == "POST":
             #Do marshalling here
-            print('ok2')
+            data = {k: v for k, v in data.items() if v is not None} # Remove keys where val is nonetype
+            print('Flexible')
+            print(data.get('flexible'))
+            data['flexible'] = False if data.get('flexible') is None else data.get('flexible')
+            data['bookings'] = [] if data.get('bookings') is None  else data.get('bookings')
+
+            print(data.get('flexible'))
             return data
 
 class Restaurant(Resource):
     def get(self):
-        admin = (request.get_json()).get("admin")
-        print(request.get_json())
-        search_params = self.marshall(request.get_json(), request_method="GET")
+
+        if request.args:
+            admin = (request.args).get("admin")
+        else:
+            admin = None
+
+        search_params = self.marshall(request.args, request_method="GET")
+        if search_params.get('_id'):
+            search_params['_id'] = ObjectId(search_params['_id'])
 
         if admin:
-            print(admin)
-            restaurants = db['restaurant'].find(search_params)
+            restaurants = db['restaurants'].find(search_params)
         else:
-            print('ok')
-            restaurants = db['restaurant'].find(search_params, {"_id": 0})
+            restaurants = db['restaurants'].find(search_params, {"_id": 0})
 
         restaurants = json.loads(json_util.dumps(restaurants))
 
         if restaurants:
             return jsonify({"status": "ok", "data": restaurants})
         else:
-            return {"response": "No bookings found for {}".format(search)}
+            return {"response": "No results found for {}".format(search_params)}
 
 
     def post(self):
@@ -105,10 +139,10 @@ class Restaurant(Resource):
         else:
             restaurant_name = insertion.get('name')
             if restaurant_name:
-                if db['restaurant'].find_one({"name": restaurant_name}):
+                if db['restaurants'].find_one({"name": restaurant_name}):
                     return {"response": "Restaurant already exists."}
                 else:
-                    result = db['restaurant'].insert_one(insertion)
+                    result = db['restaurants'].insert_one(insertion)
                     _id = result.inserted_id
                     return {"response" : "Restaurant added with id {}".format(str(_id))}
             else:
@@ -116,14 +150,14 @@ class Restaurant(Resource):
 
     def marshall(self, data, request_method):
         if request_method == "GET":
-            print('ok1')
+            if not data:
+                data = {}
             search = {"_id" : data.get("id"), "name" : data.get("name")}
             search = {k: v for k, v in search.items() if v is not None} # Remove keys where val is nonetype
             return search
 
         elif request_method == "POST":
             #Do marshalling here
-            print('ok2')
             return data
 
 api = Api(app)
