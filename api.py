@@ -4,35 +4,161 @@ import bson.json_util as json_util
 from dateutil import parser
 import pymongo
 import json
+from datetime import timedelta
 from bson.objectid import ObjectId
 
 app = Flask(__name__)
 client = pymongo.MongoClient()
 db = client['main']
+RESERVATION_HOURS = 2
 APP_URL = "http://127.0.0.1:5000"
 
 
 class Booking(Resource):
     def get(self,_id=None,restaurant_id=None,date=None, time=None):
-        search = {"_id" : _id, "restaurant_id" : restaurant_id, "date" : date, "time" : time}
-        search = {k: v for k, v in search.items() if v is not None} # Remove keys where val is nonetype
 
-        bookings = db['bookings'].find(search, {"_id": 0})
+        if request.args:
+            admin = (request.args).get("admin")
+        else:
+            admin = None
+
+        search_params = self.marshall(request.args, request_method="GET")
+        if search_params.get('_id'):
+            search_params['_id'] = ObjectId(search_params['_id'])
+
+        if admin:
+            bookings = db['bookings'].find(search_params)
+        else:
+            bookings = db['bookings'].find(search_params, {"_id": 0})
+
         bookings = json.loads(json_util.dumps(bookings))
 
         if bookings:
             return jsonify({"status": "ok", "data": bookings})
         else:
-            return {"response": "no bookings found for {}".format(date)}
+            return {"response": "no bookings found for {}".format(search_params)}
 
 
     def post(self):
-        data = request.get_json()
-        if not data:
-            data = {"response": "ERROR"}
-            return jsonify(data)
+        insertion = self.marshall(request.get_json(), request_method="POST")
+        if not insertion:
+            return jsonify({"response": "ERROR"})
         else:
-            return "ok"
+            ### Check Booking Logic
+            data = self.verify(insertion)
+
+            if data['status'] is not "ok":
+                return data['status']
+
+            insertion = data['data']
+
+            result = db['bookings'].insert_one(insertion)
+            _id = result.inserted_id
+            table_ids = insertion['table_ids']
+
+            for table_id in table_ids:
+                write_concern = db['tables'].update_one({"_id" : ObjectId(table_id)}, {"$push" : {"bookings" : _id}})
+
+
+            return {"response" : "Booking added with id {}".format(str(_id))}
+
+    def marshall(self, data, request_method):
+        if request_method == "GET":
+            if not data:
+                data = {}
+            search = {"_id" : data.get("id"), "name" : data.get("name"),
+                      "restaurant_id" : data.get("restaurant_id"),
+                      "date" : data.get("date"),
+                      "time" : data.get("time")
+                      }
+            search = {k: v for k, v in search.items() if v is not None} # Remove keys where val is nonetype
+            if data.get("table_id"):
+                search["table_ids"] = {"$elemMatch" : {"$eq" : data.get("table_id")}},
+            return search
+
+        elif request_method == "POST":
+            data['date'] = parser.parse(data['date'])
+            data['time_start'] = parser.parse(data['time'])
+            data['time_end'] = data['time_start'] + timedelta(hours=RESERVATION_HOURS)
+            del data['time']
+            ## Manage if time exceeds into next date
+
+            #Do marshalling here (check if all params are present)
+            return data
+
+    def potential(self, data):
+
+        fixed_ids = []
+        flexible_ids = []
+
+        ## Make a list of table ids containing potential tables
+        tables = db['tables'].find({"size" : data['size']})
+        tables = json.loads(json_util.dumps(tables))
+        for table in tables:
+            table_id = table['_id']['$oid']
+            fixed_ids.append(table_id)
+
+
+        tables = db['tables'].find({"flexible" : True})
+        tables = json.loads(json_util.dumps(tables))
+        for table in tables:
+            table_id = table['_id']['$oid']
+            flexible_ids.append(table_id)
+
+        return {"fixed" : fixed_ids, "flexible" : flexible_ids}
+
+    def booked(self, data):
+        booked_ids = []
+        ## Search for all tables booked during specified time slot
+        search_params = {"restaurant_id" : data['restaurant_id'],
+                        "date" : data['date'],
+                        "time_start" : {'$lt' : data['time_end']},
+                        "time_end" : {'$gt' : data['time_start']}
+                        }
+
+        bookings = db['bookings'].find(search_params)
+        bookings = json.loads(json_util.dumps(bookings))
+        for booking in bookings:
+            for table_id in booking['table_ids']:
+                booked_ids.append(table_id)
+
+        return booked_ids
+        ###
+
+
+
+    def verify(self, data):
+
+        potential_tables = self.potential(data)
+        fixed_ids = potential_tables['fixed']
+        flexible_ids = potential_tables['flexible']
+
+        booked_ids = self.booked(data)
+
+        fixed_available_ids = list(set(fixed_ids) - set(booked_ids))
+        flexible_available_ids = list(set(flexible_ids) - set(booked_ids))
+
+        if len(fixed_available_ids) > 0:
+            data['table_ids'] = [fixed_available_ids[0]]
+            return {"status" : 'ok', "data" : data}
+
+        elif len(flexible_available_ids) > 0:
+            flexible_size = 0
+            flexible_ids = []
+
+            flexible_available_ids = [ObjectId(elem) for elem in flexible_available_ids]
+
+            tables = db['tables'].find({"_id" : {"$in" : flexible_available_ids}})
+            tables = json.loads(json_util.dumps(tables))
+
+            for table in tables:
+                flexible_size = flexible_size + table['size']
+                flexible_ids.append(table["_id"]["$oid"])
+                if flexible_size >= data['size']:
+                    data['table_ids'] = flexible_ids
+                    return {"status" : "ok", "data" : data}
+
+        return {'status' : 'No tables found'}
 
 
 
@@ -99,12 +225,9 @@ class Table(Resource):
         elif request_method == "POST":
             #Do marshalling here
             data = {k: v for k, v in data.items() if v is not None} # Remove keys where val is nonetype
-            print('Flexible')
-            print(data.get('flexible'))
             data['flexible'] = False if data.get('flexible') is None else data.get('flexible')
             data['bookings'] = [] if data.get('bookings') is None  else data.get('bookings')
 
-            print(data.get('flexible'))
             return data
 
 class Restaurant(Resource):
@@ -157,6 +280,12 @@ class Restaurant(Resource):
             return search
 
         elif request_method == "POST":
+            if data.get("name") is None:
+                # Throw some error
+                return None
+            if data.get("tables") is None:
+                data['tables'] = []
+                
             #Do marshalling here
             return data
 
